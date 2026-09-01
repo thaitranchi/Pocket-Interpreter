@@ -7,25 +7,25 @@ class ModelInventory {
     return const ModelInventory(
       models: [
         OfflineModel(
-          id: 'whisper-base',
-          name: 'Whisper base',
+          id: 'whisper',
+          name: 'Whisper speech',
           type: OfflineModelType.speech,
           sizeMb: 142,
           status: OfflineModelStatus.installed,
         ),
         OfflineModel(
-          id: 'argos-en-vi',
-          name: 'Argos EN-VI',
+          id: 'mlkit-en-vi',
+          name: 'ML Kit translation',
           type: OfflineModelType.translation,
           sizeMb: 96,
           status: OfflineModelStatus.installed,
         ),
         OfflineModel(
-          id: 'silero-vad',
-          name: 'Silero VAD',
+          id: 'energy-vad',
+          name: 'Built-in voice activity detection',
           type: OfflineModelType.vad,
-          sizeMb: 3,
-          status: OfflineModelStatus.installed,
+          sizeMb: 0,
+          status: OfflineModelStatus.optional,
         ),
         OfflineModel(
           id: 'native-tts',

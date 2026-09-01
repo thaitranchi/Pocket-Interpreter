@@ -252,11 +252,11 @@ class _SettingsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: colorScheme.surface,
-        border: Border.all(color: colorScheme.outlineVariant),
+    return Material(
+      color: colorScheme.surface,
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: colorScheme.outlineVariant),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),

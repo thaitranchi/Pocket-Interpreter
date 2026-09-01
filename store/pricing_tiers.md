@@ -40,3 +40,14 @@ prefer lifetime ownership over monthly fees.
   premium driver.
 - AdMob App ID is currently a placeholder (`ca-app-pub-3940256099942544~3347511713`,
   Google's test ID) — replace with the real AdMob App ID before production release.
+
+## Play Billing wiring (implemented)
+
+| Item | Value |
+|---|---|
+| Plugin | `in_app_purchase` (`lib/monetization/pro_purchase_service.dart`) |
+| Product id | `pro_unlock` (non-consumable, one-time) |
+| Purchase flow | `ProPurchaseService.startPurchase()` → Play purchase dialog |
+| Verification | `purchaseStream` — on `purchased`/`restored`, `Entitlements.upgradeToPro()` persists locally |
+| Graceful fallback | Billing unavailable → SnackBar; tests/emulators without Play fall back to local unlock |
+| To activate | In Play Console create a non-consumable product with id **`pro_unlock`** (price ~$6.99) — code needs no change |

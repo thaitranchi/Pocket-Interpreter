@@ -6,6 +6,7 @@ import 'audio/record_audio_input_service.dart';
 import 'conversation/conversation_controller.dart';
 import 'entitlements/entitlements.dart';
 import 'models/model_inventory.dart';
+import 'monetization/pro_purchase_service.dart';
 import 'release/app_release.dart';
 import 'translation/mlkit_translation_engine.dart';
 import 'tts/native_tts_service.dart';
@@ -20,6 +21,9 @@ class PocketInterpreterApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final entitlements = Entitlements();
     unawaited(entitlements.load());
+
+    final purchaseService = ProPurchaseService(entitlements: entitlements);
+    unawaited(purchaseService.initialize());
 
     final controller = ConversationController(
       audioInputService: RecordAudioInputService(),
@@ -49,7 +53,10 @@ class PocketInterpreterApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: ConversationScreen(controller: controller),
+      home: ConversationScreen(
+        controller: controller,
+        purchaseService: purchaseService,
+      ),
     );
   }
 }

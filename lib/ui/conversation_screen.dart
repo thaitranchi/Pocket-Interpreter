@@ -8,12 +8,18 @@ import '../entitlements/entitlements.dart';
 import '../models/model_inventory.dart';
 import '../models/offline_model.dart';
 import '../monetization/ad_banner.dart';
+import '../monetization/pro_purchase_service.dart';
 import '../release/app_release.dart';
 
 class ConversationScreen extends StatefulWidget {
-  const ConversationScreen({super.key, required this.controller});
+  const ConversationScreen({
+    super.key,
+    required this.controller,
+    this.purchaseService,
+  });
 
   final ConversationController controller;
+  final ProPurchaseService? purchaseService;
 
   @override
   State<ConversationScreen> createState() => _ConversationScreenState();
@@ -73,7 +79,10 @@ class _ConversationScreenState extends State<ConversationScreen> {
                 padding: const EdgeInsets.all(16),
                 child: ListView(
                   children: [
-                    _TierBanner(entitlements: controller.entitlements),
+                    _TierBanner(
+                      entitlements: controller.entitlements,
+                      purchaseService: widget.purchaseService,
+                    ),
                     const SizedBox(height: 16),
                     _LanguageHeader(settings: settings),
                     const SizedBox(height: 16),
@@ -165,9 +174,10 @@ class _ConversationScreenState extends State<ConversationScreen> {
 }
 
 class _TierBanner extends StatelessWidget {
-  const _TierBanner({required this.entitlements});
+  const _TierBanner({required this.entitlements, this.purchaseService});
 
   final Entitlements entitlements;
+  final ProPurchaseService? purchaseService;
 
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
@@ -221,27 +231,79 @@ class _TierBanner extends StatelessWidget {
               ),
             ),
             if (!isPro)
-              FilledButton.tonalIcon(
-                onPressed: () => _upgrade(context),
-                icon: const Icon(Icons.workspace_premium),
-                label: const Text('Go Pro'),
+              _GoProButton(
+                purchaseService: purchaseService,
+                entitlements: entitlements,
               ),
           ],
         ),
       ),
     );
   }
+}
 
-  void _upgrade(BuildContext context) {
-    entitlements.upgradeToPro();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Pro unlocked (one-time purchase placeholder). '
-          'Connect Google Play Billing for real payments.',
-        ),
-      ),
+class _GoProButton extends StatelessWidget {
+  const _GoProButton({
+    required this.purchaseService,
+    required this.entitlements,
+  });
+
+  final ProPurchaseService? purchaseService;
+  final Entitlements entitlements;
+
+  @override
+  Widget build(BuildContext context) {
+    final billing = purchaseService;
+    if (billing == null) {
+      return FilledButton.tonalIcon(
+        onPressed: () => _upgradeLocally(context),
+        icon: const Icon(Icons.workspace_premium),
+        label: const Text('Go Pro'),
+      );
+    }
+    return ValueListenableBuilder<bool>(
+      valueListenable: billing.purchasing,
+      builder: (context, purchasing, _) {
+        return FilledButton.tonalIcon(
+          onPressed: purchasing ? null : () => _upgradeViaBilling(context),
+          icon: purchasing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.workspace_premium),
+          label: Text(purchasing ? 'Purchasing…' : 'Go Pro'),
+        );
+      },
     );
+  }
+
+  Future<void> _upgradeLocally(BuildContext context) async {
+    await entitlements.upgradeToPro();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pro unlocked (test build)')),
+      );
+    }
+  }
+
+  Future<void> _upgradeViaBilling(BuildContext context) async {
+    final billing = purchaseService;
+    if (billing == null) {
+      return;
+    }
+    final started = await billing.startPurchase();
+    if (!started && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Google Play purchases are unavailable on this device yet. '
+            'Please use a phone with the Play Store.',
+          ),
+        ),
+      );
+    }
   }
 }
 

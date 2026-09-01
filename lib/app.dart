@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'audio/record_audio_input_service.dart';
 import 'conversation/conversation_controller.dart';
+import 'entitlements/entitlements.dart';
 import 'models/model_inventory.dart';
 import 'release/app_release.dart';
 import 'translation/mlkit_translation_engine.dart';
@@ -15,6 +18,9 @@ class PocketInterpreterApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final entitlements = Entitlements();
+    unawaited(entitlements.load());
+
     final controller = ConversationController(
       audioInputService: RecordAudioInputService(),
       speechRecognizer: WhisperSpeechRecognizer(),
@@ -22,6 +28,7 @@ class PocketInterpreterApp extends StatelessWidget {
       ttsService: const NativeTtsService(),
       vadService: const EnergyVadService(),
       modelInventory: ModelInventory.mvpDefaults(),
+      entitlements: entitlements,
     );
 
     return MaterialApp(

@@ -26,7 +26,7 @@ class ConversationSettings {
     this.sourceLanguage = SupportedLanguage.english,
     this.targetLanguage = SupportedLanguage.vietnamese,
     this.mode = InterpreterMode.pushToTalk,
-    this.speechModel = SpeechModelProfile.base,
+    this.speechModel = SpeechModelProfile.tiny,
     this.voicePlaybackEnabled = true,
   });
 

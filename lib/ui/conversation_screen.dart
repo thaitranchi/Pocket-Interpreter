@@ -4,8 +4,10 @@ import '../conversation/conversation_controller.dart';
 import '../conversation/conversation_message.dart';
 import '../conversation/conversation_settings.dart';
 import '../conversation/language.dart';
+import '../entitlements/entitlements.dart';
 import '../models/model_inventory.dart';
 import '../models/offline_model.dart';
+import '../monetization/ad_banner.dart';
 import '../release/app_release.dart';
 
 class ConversationScreen extends StatefulWidget {
@@ -64,32 +66,45 @@ class _ConversationScreenState extends State<ConversationScreen> {
         ],
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: ListView(
-            children: [
-              _LanguageHeader(settings: settings),
-              const SizedBox(height: 16),
-              _ModeSelector(
-                selectedMode: settings.mode,
-                onChanged: controller.setMode,
+        child: Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: ListView(
+                  children: [
+                    _TierBanner(entitlements: controller.entitlements),
+                    const SizedBox(height: 16),
+                    _LanguageHeader(settings: settings),
+                    const SizedBox(height: 16),
+                    _ModeSelector(
+                      selectedMode: settings.mode,
+                      onChanged: controller.setMode,
+                    ),
+                    const SizedBox(height: 12),
+                    _SettingsPanel(
+                      settings: settings,
+                      entitlements: controller.entitlements,
+                      onSourceChanged: controller.setSourceLanguage,
+                      onTargetChanged: controller.setTargetLanguage,
+                      onModelChanged: controller.setSpeechModel,
+                      onVoicePlaybackChanged: controller.setVoicePlaybackEnabled,
+                    ),
+                    const SizedBox(height: 16),
+                    _ReadinessPanel(inventory: controller.modelInventory),
+                    const SizedBox(height: 16),
+                    _StatusPanel(
+                      status: controller.status,
+                      phase: controller.phase,
+                    ),
+                    const SizedBox(height: 16),
+                    _MessageList(messages: controller.messages),
+                  ],
+                ),
               ),
-              const SizedBox(height: 12),
-              _SettingsPanel(
-                settings: settings,
-                onSourceChanged: controller.setSourceLanguage,
-                onTargetChanged: controller.setTargetLanguage,
-                onModelChanged: controller.setSpeechModel,
-                onVoicePlaybackChanged: controller.setVoicePlaybackEnabled,
-              ),
-              const SizedBox(height: 16),
-              _ReadinessPanel(inventory: controller.modelInventory),
-              const SizedBox(height: 16),
-              _StatusPanel(status: controller.status, phase: controller.phase),
-              const SizedBox(height: 16),
-              _MessageList(messages: controller.messages),
-            ],
-          ),
+            ),
+            AdBanner(enabled: !controller.entitlements.isPro),
+          ],
         ),
       ),
       bottomNavigationBar: SafeArea(
@@ -145,6 +160,87 @@ class _ConversationScreenState extends State<ConversationScreen> {
           'platform TTS adapters are integration points for the next build.',
         ),
       ],
+    );
+  }
+}
+
+class _TierBanner extends StatelessWidget {
+  const _TierBanner({required this.entitlements});
+
+  final Entitlements entitlements;
+
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    }
+    return '${seconds}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    final isPro = entitlements.isPro;
+    final usageText = isPro
+        ? 'Unlimited voice interpreting'
+        : '${_formatDuration(entitlements.remainingVoiceToday)} of '
+              '${_formatDuration(entitlements.freeDailyVoiceLimit)} voice today';
+
+    return Material(
+      color: isPro
+          ? colorScheme.primaryContainer
+          : colorScheme.surfaceContainerHighest,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              Icons.workspace_premium,
+              color: isPro ? colorScheme.primary : colorScheme.outline,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isPro ? 'Pro plan active' : '${entitlements.tier.label} plan',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    usageText,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            if (!isPro)
+              FilledButton.tonalIcon(
+                onPressed: () => _upgrade(context),
+                icon: const Icon(Icons.workspace_premium),
+                label: const Text('Go Pro'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _upgrade(BuildContext context) {
+    entitlements.upgradeToPro();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Pro unlocked (one-time purchase placeholder). '
+          'Connect Google Play Billing for real payments.',
+        ),
+      ),
     );
   }
 }
@@ -236,6 +332,7 @@ class _ModeSelector extends StatelessWidget {
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     required this.settings,
+    required this.entitlements,
     required this.onSourceChanged,
     required this.onTargetChanged,
     required this.onModelChanged,
@@ -243,6 +340,7 @@ class _SettingsPanel extends StatelessWidget {
   });
 
   final ConversationSettings settings;
+  final Entitlements entitlements;
   final ValueChanged<SupportedLanguage> onSourceChanged;
   final ValueChanged<SupportedLanguage> onTargetChanged;
   final ValueChanged<SpeechModelProfile> onModelChanged;
@@ -290,10 +388,17 @@ class _SettingsPanel extends StatelessWidget {
               ),
               items: SpeechModelProfile.values
                   .map(
-                    (model) => DropdownMenuItem(
-                      value: model,
-                      child: Text('${model.label} - ${model.description}'),
-                    ),
+                    (model) {
+                      final allowed = entitlements.canAccess(model);
+                      return DropdownMenuItem(
+                        value: model,
+                        enabled: allowed,
+                        child: Text(
+                          '${model.label} - ${model.description}'
+                          '${allowed ? '' : ' · Pro'}',
+                        ),
+                      );
+                    },
                   )
                   .toList(),
               onChanged: (value) {
@@ -309,6 +414,39 @@ class _SettingsPanel extends StatelessWidget {
               subtitle: const Text('Used in conversation mode'),
               value: settings.voicePlaybackEnabled,
               onChanged: onVoicePlaybackChanged,
+            ),
+            const Divider(height: 16),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                entitlements.isPro
+                    ? Icons.auto_awesome
+                    : Icons.lock_outline,
+                color: entitlements.isPro
+                    ? colorScheme.primary
+                    : colorScheme.outline,
+              ),
+              title: const Text('Advanced features'),
+              subtitle: const Text('Document & camera OCR, specialized jargon'),
+              trailing: entitlements.isPro
+                  ? Icon(Icons.check_circle, color: colorScheme.primary)
+                  : Text(
+                      'Pro',
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                            color: colorScheme.primary,
+                          ),
+                    ),
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      entitlements.isPro
+                          ? 'Advanced features coming soon'
+                          : 'Upgrade to Pro to unlock advanced features',
+                    ),
+                  ),
+                );
+              },
             ),
           ],
         ),

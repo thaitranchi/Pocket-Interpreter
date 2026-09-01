@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_interpreter/app.dart';
 
@@ -8,8 +9,12 @@ void main() {
     expect(find.text('Pocket Interpreter'), findsOneWidget);
     expect(find.text('Source'), findsOneWidget);
     expect(find.text('Target'), findsOneWidget);
-    expect(find.text('Offline pack ready'), findsOneWidget);
     expect(find.text('Hold to interpret'), findsOneWidget);
+
+    await tester.drag(find.byType(ListView), const Offset(0, -400));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Offline pack ready'), findsOneWidget);
   });
 
   testWidgets('shows release information', (tester) async {

@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../audio/audio_buffer.dart';
 import '../audio/audio_input_service.dart';
+import '../entitlements/entitlements.dart';
 import '../streaming/streaming_session.dart';
 import '../streaming/continuous_streaming_session.dart';
 import '../translation/translation_engine.dart';
@@ -35,12 +36,17 @@ class ConversationController extends ChangeNotifier {
     required TtsService ttsService,
     required VadService vadService,
     required ModelInventory modelInventory,
+    Entitlements? entitlements,
   }) : _audioInputService = audioInputService,
        _speechRecognizer = speechRecognizer,
        _translationEngine = translationEngine,
        _ttsService = ttsService,
        _vadService = vadService,
-       _modelInventory = modelInventory;
+       _modelInventory = modelInventory,
+       _entitlements = entitlements ?? Entitlements(),
+       _ownsEntitlements = entitlements == null {
+    _entitlements.addListener(_onEntitlementsChanged);
+  }
 
   final AudioInputService _audioInputService;
   final SpeechRecognizer _speechRecognizer;
@@ -48,6 +54,8 @@ class ConversationController extends ChangeNotifier {
   final TtsService _ttsService;
   final VadService _vadService;
   final ModelInventory _modelInventory;
+  final Entitlements _entitlements;
+  final bool _ownsEntitlements;
 
   final List<ConversationMessage> _messages = [];
 
@@ -55,6 +63,7 @@ class ConversationController extends ChangeNotifier {
   InterpreterPhase _phase = InterpreterPhase.idle;
   String _status = 'Ready for offline interpreting';
   StreamingSession? _activeSession;
+  Timer? _usageTimer;
 
   List<ConversationMessage> get messages => List.unmodifiable(_messages);
   ConversationSettings get settings => _settings;
@@ -63,6 +72,14 @@ class ConversationController extends ChangeNotifier {
   String get status => _status;
   ModelInventory get modelInventory => _modelInventory;
   bool get isReady => _modelInventory.isReady;
+  Entitlements get entitlements => _entitlements;
+
+  static const limitReachedStatus =
+      'Daily voice limit reached. Upgrade to Pro for unlimited interpreting';
+
+  void _onEntitlementsChanged() {
+    notifyListeners();
+  }
 
   bool get isStreaming => _activeSession != null;
 
@@ -118,6 +135,11 @@ class ConversationController extends ChangeNotifier {
   }
 
   void setSpeechModel(SpeechModelProfile model) {
+    if (!_entitlements.canAccess(model)) {
+      _status = '${model.label} speech model is a Pro feature';
+      notifyListeners();
+      return;
+    }
     _settings = _settings.copyWith(speechModel: model);
     _status = '${model.label} speech model selected';
     notifyListeners();
@@ -135,6 +157,12 @@ class ConversationController extends ChangeNotifier {
     notifyListeners();
   }
 
+  @visibleForTesting
+  void injectMessage(ConversationMessage message) {
+    _messages.insert(0, message);
+    notifyListeners();
+  }
+
   Future<void> startPushToTalk() async {
     if (isBusy || isStreaming) {
       return;
@@ -142,6 +170,12 @@ class ConversationController extends ChangeNotifier {
 
     if (!isReady) {
       _status = 'Install required offline models before interpreting';
+      notifyListeners();
+      return;
+    }
+
+    if (!_entitlements.canUseVoiceFeature()) {
+      _status = limitReachedStatus;
       notifyListeners();
       return;
     }
@@ -168,7 +202,7 @@ class ConversationController extends ChangeNotifier {
 
     await Future<void>.delayed(const Duration(milliseconds: 500));
 
-    await micSub?.cancel();
+    await micSub.cancel();
     await _audioInputService.close();
 
     if (buffer.isEmpty) {
@@ -189,6 +223,8 @@ class ConversationController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+
+    _entitlements.consumeVoice(_audioDurationFor(buffer));
 
     _phase = InterpreterPhase.transcribing;
     _status = 'Running local speech recognition...';
@@ -248,6 +284,13 @@ class ConversationController extends ChangeNotifier {
       return;
     }
 
+    if (!_entitlements.canUseVoiceFeature()) {
+      _status = limitReachedStatus;
+      notifyListeners();
+      return;
+    }
+
+    _startUsageTimer();
     final session = ContinuousStreamingSession(
       audioInputService: _audioInputService,
       speechRecognizer: _speechRecognizer,
@@ -294,7 +337,7 @@ class ConversationController extends ChangeNotifier {
     if (_activeSession == null) {
       return;
     }
-
+    _cancelUsageTimer();
     final session = _activeSession;
     _activeSession = null;
     await session?.stop();
@@ -303,9 +346,38 @@ class ConversationController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _startUsageTimer() {
+    _cancelUsageTimer();
+    _usageTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _entitlements.consumeVoice(const Duration(seconds: 1));
+      if (!_entitlements.canUseVoiceFeature()) {
+        _status = limitReachedStatus;
+        notifyListeners();
+        stopStreaming();
+      }
+    });
+  }
+
+  void _cancelUsageTimer() {
+    _usageTimer?.cancel();
+    _usageTimer = null;
+  }
+
+  Duration _audioDurationFor(AudioBuffer buffer) {
+    const int sampleRate = 16000;
+    const int bytesPerSample = 2;
+    final seconds = buffer.length / (sampleRate * bytesPerSample);
+    return Duration(milliseconds: (seconds * 1000).round());
+  }
+
   @override
   void dispose() {
+    _cancelUsageTimer();
     stopStreaming();
+    _entitlements.removeListener(_onEntitlementsChanged);
+    if (_ownsEntitlements) {
+      _entitlements.dispose();
+    }
     super.dispose();
   }
 }

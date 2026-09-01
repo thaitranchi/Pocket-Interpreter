@@ -1,4 +1,4 @@
-package com.tctsoftwares.pocket_interpreter
+package com.tranchithai.poket_interpreter
 
 import io.flutter.embedding.android.FlutterActivity
 

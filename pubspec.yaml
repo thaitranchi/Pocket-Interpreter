@@ -1,7 +1,7 @@
 name: pocket_interpreter
 description: "Fully offline real-time AI conversation translator."
 publish_to: 'none'
-version: 1.0.0+2
+version: 1.0.0+3
 
 environment:
   sdk: ^3.11.5
@@ -15,9 +15,6 @@ dependencies:
   whisper_ggml: ^2.6.0
   google_mlkit_translation: ^0.15.1
   path_provider: ^2.1.0
-  shared_preferences: ^2.3.0
-  google_mobile_ads: ^5.2.0
-  in_app_purchase: ^3.2.0
 
 dev_dependencies:
   flutter_test:

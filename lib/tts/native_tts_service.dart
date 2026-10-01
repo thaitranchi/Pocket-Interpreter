@@ -1,44 +1,27 @@
-import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+
 import '../conversation/language.dart';
 import 'tts_service.dart';
 
 class NativeTtsService implements TtsService {
-  const NativeTtsService();
+  NativeTtsService({FlutterTts? tts}) : _tts = tts ?? FlutterTts();
 
-  static final FlutterTts _tts = FlutterTts();
-
-  bool _isTestEnvironment() {
-    try {
-      if (Platform.environment.containsKey('FLUTTER_TEST')) {
-        return true;
-      }
-    } catch (_) {}
-    try {
-      final bindingStr = WidgetsBinding.instance.toString();
-      if (bindingStr.contains('Test')) {
-        return true;
-      }
-    } catch (_) {}
-    return false;
-  }
+  final FlutterTts _tts;
 
   @override
   Future<void> speak(String text, {required SupportedLanguage language}) async {
-    if (_isTestEnvironment()) {
-      debugPrint('NativeTtsService: Running in test environment, skipping speak call.');
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+    if (text.trim().isEmpty) {
       return;
     }
-
+    final locale = language == SupportedLanguage.english ? 'en-US' : 'vi-VN';
     try {
-      final locale = language == SupportedLanguage.english ? 'en-US' : 'vi-VN';
       await _tts.setLanguage(locale);
+      await _tts.setSpeechRate(0.45);
+      await _tts.awaitSpeakCompletion(true);
       await _tts.speak(text);
-    } catch (e) {
-      // Degrade gracefully if running in a test environment where platform channels are unavailable
-      debugPrint('NativeTTS: Failed to speak "$text" using locale ($language): $e');
+    } catch (error) {
+      debugPrint('NativeTtsService: failed to speak ($locale): $error');
     }
   }
 }

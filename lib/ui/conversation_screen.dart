@@ -1,25 +1,27 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../conversation/conversation_controller.dart';
 import '../conversation/conversation_message.dart';
 import '../conversation/conversation_settings.dart';
 import '../conversation/language.dart';
-import '../entitlements/entitlements.dart';
 import '../models/model_inventory.dart';
 import '../models/offline_model.dart';
-import '../monetization/ad_banner.dart';
-import '../monetization/pro_purchase_service.dart';
 import '../release/app_release.dart';
 
 class ConversationScreen extends StatefulWidget {
   const ConversationScreen({
     super.key,
     required this.controller,
-    this.purchaseService,
+    this.ensureModelsReady,
   });
 
   final ConversationController controller;
-  final ProPurchaseService? purchaseService;
+
+  /// Downloads any offline model the current settings need. Wired to the
+  /// release build so the offline pack is real rather than assumed.
+  final Future<void> Function()? ensureModelsReady;
 
   @override
   State<ConversationScreen> createState() => _ConversationScreenState();
@@ -28,20 +30,100 @@ class ConversationScreen extends StatefulWidget {
 class _ConversationScreenState extends State<ConversationScreen> {
   ConversationController get controller => widget.controller;
 
+  String? _preparedFor;
+  String? _lastSettingsKey;
+  bool _isPreparingModels = false;
+  bool _syncRequested = false;
+
+  String get _settingsKey {
+    final settings = controller.settings;
+    return '${settings.speechModel.name}-${settings.sourceLanguage.name}-'
+        '${settings.targetLanguage.name}';
+  }
+
   @override
   void initState() {
     super.initState();
     controller.addListener(_onControllerChanged);
+    controller.modelInventory.addListener(_onInventoryChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncModels());
+  }
+
+  @override
+  void didUpdateWidget(ConversationScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerChanged);
+      oldWidget.controller.modelInventory.removeListener(_onInventoryChanged);
+      controller.addListener(_onControllerChanged);
+      controller.modelInventory.addListener(_onInventoryChanged);
+      _preparedFor = null;
+      _lastSettingsKey = null;
+      _syncModels();
+    }
   }
 
   @override
   void dispose() {
     controller.removeListener(_onControllerChanged);
+    controller.modelInventory.removeListener(_onInventoryChanged);
     super.dispose();
   }
 
   void _onControllerChanged() {
-    setState(() {});
+    if (mounted) {
+      setState(() {});
+    }
+    final key = _settingsKey;
+    if (key != _lastSettingsKey) {
+      _lastSettingsKey = key;
+      _syncModels();
+    }
+  }
+
+  void _onInventoryChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  /// Kicks off a model download whenever the required set changes. A request
+  /// that arrives while a download is in flight is queued and re-run once the
+  /// current one finishes.
+  Future<void> _syncModels() async {
+    final ensure = widget.ensureModelsReady;
+    if (ensure == null) {
+      return;
+    }
+    if (_isPreparingModels) {
+      _syncRequested = true;
+      return;
+    }
+
+    final key = _settingsKey;
+    _lastSettingsKey = key;
+    if (key == _preparedFor) {
+      return;
+    }
+    _preparedFor = key;
+    _isPreparingModels = true;
+    _syncRequested = false;
+    if (mounted) {
+      setState(() {});
+    }
+
+    try {
+      await ensure();
+    } finally {
+      _isPreparingModels = false;
+      if (mounted) {
+        setState(() {});
+      }
+      if (_syncRequested) {
+        _syncRequested = false;
+        unawaited(_syncModels());
+      }
+    }
   }
 
   @override
@@ -79,11 +161,6 @@ class _ConversationScreenState extends State<ConversationScreen> {
                 padding: const EdgeInsets.all(16),
                 child: ListView(
                   children: [
-                    _TierBanner(
-                      entitlements: controller.entitlements,
-                      purchaseService: widget.purchaseService,
-                    ),
-                    const SizedBox(height: 16),
                     _LanguageHeader(settings: settings),
                     const SizedBox(height: 16),
                     _ModeSelector(
@@ -93,14 +170,19 @@ class _ConversationScreenState extends State<ConversationScreen> {
                     const SizedBox(height: 12),
                     _SettingsPanel(
                       settings: settings,
-                      entitlements: controller.entitlements,
                       onSourceChanged: controller.setSourceLanguage,
                       onTargetChanged: controller.setTargetLanguage,
                       onModelChanged: controller.setSpeechModel,
                       onVoicePlaybackChanged: controller.setVoicePlaybackEnabled,
                     ),
                     const SizedBox(height: 16),
-                    _ReadinessPanel(inventory: controller.modelInventory),
+                    _ReadinessPanel(
+                      inventory: controller.modelInventory,
+                      onRetry: () {
+                        _preparedFor = null;
+                        _syncModels();
+                      },
+                    ),
                     const SizedBox(height: 16),
                     _StatusPanel(
                       status: controller.status,
@@ -112,7 +194,6 @@ class _ConversationScreenState extends State<ConversationScreen> {
                 ),
               ),
             ),
-            AdBanner(enabled: !controller.entitlements.isPro),
           ],
         ),
       ),
@@ -124,8 +205,8 @@ class _ConversationScreenState extends State<ConversationScreen> {
                   onPressed: controller.isBusy
                       ? null
                       : (controller.isStreaming
-                          ? controller.stopStreaming
-                          : controller.startStreaming),
+                            ? controller.stopStreaming
+                            : controller.startStreaming),
                   style: FilledButton.styleFrom(
                     backgroundColor: controller.isStreaming
                         ? Theme.of(context).colorScheme.error
@@ -141,12 +222,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
                         : 'Start continuous interpreting',
                   ),
                 )
-              : FilledButton.icon(
-                  onPressed: controller.isBusy ? null : controller.startPushToTalk,
-                  icon: Icon(controller.isBusy ? Icons.hearing : Icons.mic),
-                  label: Text(
-                    controller.isBusy ? controller.phase.label : 'Hold to interpret',
-                  ),
+              : _PushToTalkButton(
+                  controller: controller,
+                  isPreparingModels: _isPreparingModels,
                 ),
         ),
       ),
@@ -163,147 +241,81 @@ class _ConversationScreenState extends State<ConversationScreen> {
       children: const [
         SizedBox(height: 12),
         Text(
-          'v1.0.0 includes the Flutter app shell, EN-VI mock translation flow, '
-          'offline model readiness checks, mode controls, and release tests. '
-          'Native Whisper.cpp, Argos Translate, microphone streaming, and '
-          'platform TTS adapters are integration points for the next build.',
+          'Speech recognition runs fully on-device via whisper.cpp and '
+          'translation via ML Kit on-device models. The offline models are '
+          'downloaded on first launch and then work without a connection.',
         ),
       ],
     );
   }
 }
 
-class _TierBanner extends StatelessWidget {
-  const _TierBanner({required this.entitlements, this.purchaseService});
-
-  final Entitlements entitlements;
-  final ProPurchaseService? purchaseService;
-
-  String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes;
-    final seconds = duration.inSeconds % 60;
-    if (minutes > 0) {
-      return '${minutes}m ${seconds}s';
-    }
-    return '${seconds}s';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    final isPro = entitlements.isPro;
-    final usageText = isPro
-        ? 'Unlimited voice interpreting'
-        : '${_formatDuration(entitlements.remainingVoiceToday)} of '
-              '${_formatDuration(entitlements.freeDailyVoiceLimit)} voice today';
-
-    return Material(
-      color: isPro
-          ? colorScheme.primaryContainer
-          : colorScheme.surfaceContainerHighest,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(
-          children: [
-            Icon(
-              Icons.workspace_premium,
-              color: isPro ? colorScheme.primary : colorScheme.outline,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    isPro ? 'Pro plan active' : '${entitlements.tier.label} plan',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    usageText,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-            if (!isPro)
-              _GoProButton(
-                purchaseService: purchaseService,
-                entitlements: entitlements,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _GoProButton extends StatelessWidget {
-  const _GoProButton({
-    required this.purchaseService,
-    required this.entitlements,
+/// True press-and-hold capture: the recording length matches how long the user
+/// actually holds the button, instead of a fixed 500 ms window.
+class _PushToTalkButton extends StatefulWidget {
+  const _PushToTalkButton({
+    required this.controller,
+    required this.isPreparingModels,
   });
 
-  final ProPurchaseService? purchaseService;
-  final Entitlements entitlements;
+  final ConversationController controller;
+  final bool isPreparingModels;
+
+  @override
+  State<_PushToTalkButton> createState() => _PushToTalkButtonState();
+}
+
+class _PushToTalkButtonState extends State<_PushToTalkButton> {
+  int? _activePointer;
+
+  void _release(int pointer) {
+    if (_activePointer != pointer) {
+      return;
+    }
+    _activePointer = null;
+    widget.controller.requestPushToTalkRelease();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final billing = purchaseService;
-    if (billing == null) {
-      return FilledButton.tonalIcon(
-        onPressed: () => _upgradeLocally(context),
-        icon: const Icon(Icons.workspace_premium),
-        label: const Text('Go Pro'),
-      );
-    }
-    return ValueListenableBuilder<bool>(
-      valueListenable: billing.purchasing,
-      builder: (context, purchasing, _) {
-        return FilledButton.tonalIcon(
-          onPressed: purchasing ? null : () => _upgradeViaBilling(context),
-          icon: purchasing
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.workspace_premium),
-          label: Text(purchasing ? 'Purchasing…' : 'Go Pro'),
-        );
-      },
-    );
-  }
+    final controller = widget.controller;
+    final inventory = controller.modelInventory;
+    final canInterpret = controller.isReady && !inventory.isDownloading;
+    final isBusy = controller.isBusy;
 
-  Future<void> _upgradeLocally(BuildContext context) async {
-    await entitlements.upgradeToPro();
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pro unlocked (test build)')),
-      );
+    final String label;
+    if (!canInterpret) {
+      label = inventory.isDownloading
+          ? 'Preparing offline models...'
+          : 'Offline models required';
+    } else if (isBusy) {
+      label = controller.phase.label;
+    } else {
+      label = 'Hold to interpret';
     }
-  }
 
-  Future<void> _upgradeViaBilling(BuildContext context) async {
-    final billing = purchaseService;
-    if (billing == null) {
-      return;
-    }
-    final started = await billing.startPurchase();
-    if (!started && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Google Play purchases are unavailable on this device yet. '
-            'Please use a phone with the Play Store.',
-          ),
+    return Listener(
+      onPointerDown: canInterpret && !isBusy
+          ? (event) {
+              if (_activePointer == null) {
+                _activePointer = event.pointer;
+                controller.startPushToTalk();
+              }
+            }
+          : null,
+      onPointerUp: (event) => _release(event.pointer),
+      onPointerCancel: (event) => _release(event.pointer),
+      child: FilledButton.icon(
+        onPressed: canInterpret && !isBusy
+            ? () => controller.startPushToTalk()
+            : null,
+        icon: Icon(isBusy ? Icons.hearing : Icons.mic),
+        label: Text(label),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size.fromHeight(48),
         ),
-      );
-    }
+      ),
+    );
   }
 }
 
@@ -394,7 +406,6 @@ class _ModeSelector extends StatelessWidget {
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     required this.settings,
-    required this.entitlements,
     required this.onSourceChanged,
     required this.onTargetChanged,
     required this.onModelChanged,
@@ -402,7 +413,6 @@ class _SettingsPanel extends StatelessWidget {
   });
 
   final ConversationSettings settings;
-  final Entitlements entitlements;
   final ValueChanged<SupportedLanguage> onSourceChanged;
   final ValueChanged<SupportedLanguage> onTargetChanged;
   final ValueChanged<SpeechModelProfile> onModelChanged;
@@ -450,17 +460,12 @@ class _SettingsPanel extends StatelessWidget {
               ),
               items: SpeechModelProfile.values
                   .map(
-                    (model) {
-                      final allowed = entitlements.canAccess(model);
-                      return DropdownMenuItem(
-                        value: model,
-                        enabled: allowed,
-                        child: Text(
-                          '${model.label} - ${model.description}'
-                          '${allowed ? '' : ' · Pro'}',
-                        ),
-                      );
-                    },
+                    (model) => DropdownMenuItem(
+                      value: model,
+                      child: Text(
+                        '${model.label} - ${model.description}',
+                      ),
+                    ),
                   )
                   .toList(),
               onChanged: (value) {
@@ -476,39 +481,6 @@ class _SettingsPanel extends StatelessWidget {
               subtitle: const Text('Used in conversation mode'),
               value: settings.voicePlaybackEnabled,
               onChanged: onVoicePlaybackChanged,
-            ),
-            const Divider(height: 16),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                entitlements.isPro
-                    ? Icons.auto_awesome
-                    : Icons.lock_outline,
-                color: entitlements.isPro
-                    ? colorScheme.primary
-                    : colorScheme.outline,
-              ),
-              title: const Text('Advanced features'),
-              subtitle: const Text('Document & camera OCR, specialized jargon'),
-              trailing: entitlements.isPro
-                  ? Icon(Icons.check_circle, color: colorScheme.primary)
-                  : Text(
-                      'Pro',
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                            color: colorScheme.primary,
-                          ),
-                    ),
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      entitlements.isPro
-                          ? 'Advanced features coming soon'
-                          : 'Upgrade to Pro to unlock advanced features',
-                    ),
-                  ),
-                );
-              },
             ),
           ],
         ),
@@ -552,14 +524,21 @@ class _LanguageDropdown extends StatelessWidget {
 }
 
 class _ReadinessPanel extends StatelessWidget {
-  const _ReadinessPanel({required this.inventory});
+  const _ReadinessPanel({
+    required this.inventory,
+    required this.onRetry,
+  });
 
   final ModelInventory inventory;
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+
+    final isReady = inventory.isReady;
+    final hasFailure = inventory.hasFailure;
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -575,23 +554,51 @@ class _ReadinessPanel extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  inventory.isReady ? Icons.offline_pin : Icons.error_outline,
-                  color: inventory.isReady
+                  isReady
+                      ? Icons.offline_pin
+                      : (hasFailure
+                            ? Icons.error_outline
+                            : Icons.downloading),
+                  color: isReady
                       ? colorScheme.primary
-                      : colorScheme.error,
+                      : (hasFailure ? colorScheme.error : colorScheme.outline),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    inventory.isReady
+                    isReady
                         ? 'Offline pack ready'
-                        : 'Offline pack incomplete',
+                        : (hasFailure
+                              ? 'Offline pack incomplete'
+                              : 'Downloading offline pack'),
                     style: textTheme.titleMedium,
                   ),
                 ),
-                Text('${inventory.installedSizeMb} MB'),
+                if (isReady) Text('${inventory.installedSizeMb} MB'),
               ],
             ),
+            if (inventory.isDownloading) ...[
+              const SizedBox(height: 12),
+              LinearProgressIndicator(value: inventory.progress),
+              const SizedBox(height: 6),
+              Text(
+                '${(inventory.progress * 100).round()}% - keep the app open',
+                style: textTheme.bodySmall,
+              ),
+            ],
+            if (hasFailure) ...[
+              const SizedBox(height: 12),
+              Text(
+                'A model failed to download. Check your connection and retry.',
+                style: textTheme.bodySmall?.copyWith(color: colorScheme.error),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry download'),
+              ),
+            ],
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,

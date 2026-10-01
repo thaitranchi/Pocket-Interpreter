@@ -10,7 +10,6 @@
 - [Setup](#setup)
 - [Testing](#testing)
 - [Build & release](#build--release)
-- [Monetization](#monetization)
 - [Store assets](#store-assets)
 - [Privacy](#privacy)
 - [Versioning](#versioning)
@@ -26,7 +25,7 @@
 - **Subtitle/mode controls**: conversation, subtitle, push-to-talk
 - **Voice activity detection** (energy gate) for clean capture
 - **Offline pack readiness** panel with model download status
-- **Free + Pro tiers**: Free (daily voice limit, banner ads) / one-time Pro unlock
+- **Fully unlocked**: every speech model (`tiny` / `base` / `small`) and mode, no ads, no in-app purchases
 - **Conversation history** with latency metadata
 - **Comprehensive test suite** (unit + widget + golden/screenshot)
 
@@ -42,7 +41,7 @@ Microphone
   -> Speaker Output
 ```
 
-All stages run on-device. The **conversation controller** (`ConversationController`) orchestrates the pipeline and enforces entitlements (per-minute voice budget on the Free tier).
+All stages run on-device. The **conversation controller** (`ConversationController`) orchestrates the pipeline.
 
 ## Project structure
 
@@ -52,9 +51,7 @@ lib/
   app.dart                       # app widget, DI wiring
   audio/                         # input service + PCM buffer
   conversation/                  # controller, settings, messages, languages
-  entitlements/                  # Free/Pro tiers, voice limits, persistence
   models/                        # Whisper model inventory / offline models
-  monetization/                  # AdMob banner + Play Billing (Pro purchase)
   release/                       # app name/version metadata
   streaming/                     # continuous streaming sessions
   translation/                   # ML Kit engine + interface
@@ -65,7 +62,6 @@ lib/
 test/
   audio_buffer_test.dart
   conversation_controller_test.dart
-  entitlements_test.dart
   store_screenshot_generator_test.dart
   vad_test.dart
   widget_test.dart
@@ -120,18 +116,6 @@ separately and never commit them.
 > `1.0.0+2`. If the Google Play Console requires the signing key during the first upload,
 > Play is configured with your upload key.
 
-## Monetization
-
-| Tier | Included |
-|------|----------|
-| **Free** | Standard text/language translation; **limited voice**: 5 min/day; **banner ads**; `tiny` speech model |
-| **Pro** (one-time) | Unlimited voice interpretation, no ads, all speech models (`tiny`/`base`/`small`), advanced features |
-
-- **Ads**: `google_mobile_ads` banner shown only on the Free tier (`lib/monetization/ad_banner.dart`).
-- **Play Billing**: `in_app_purchase` one-time non-consumable product `pro_unlock`
-  (`lib/monetization/pro_purchase_service.dart`). Purchase persistence lives in
-  `lib/entitlements/`. See `store/pricing_tiers.md`.
-
 ## Store assets
 
 Generate screenshots and graphics from the committed generators:
@@ -145,14 +129,11 @@ flutter test test/store_screenshot_generator_test.dart --update-goldens
 pwsh tool/make_feature_graphic.ps1
 ```
 
-Placeholders to replace before a production release (see `store/play_store_listing.md`):
-validate your AdMob App ID / Ad Unit ID live.
-
 ## Privacy
 
 Pocket Interpreter runs speech recognition (Whisper.cpp) and translation (Google ML Kit)
-**fully on device**. Network access is used only to download the ML Kit translation model
-and AdMob ads on first use. No audio or text is uploaded to a server.
+**fully on device**. Network access is used only to download the offline speech and ML Kit
+translation models on first use. No audio or text is uploaded to a server.
 
 Full privacy policy:
 **https://thaitranchi.github.io/Pocket-Interpreter/store/privacy_policy.html**

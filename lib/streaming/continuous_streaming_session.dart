@@ -1,5 +1,7 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+
 import '../audio/audio_buffer.dart';
 import '../audio/audio_input_service.dart';
 import '../conversation/conversation_message.dart';
@@ -21,15 +23,22 @@ class ContinuousStreamingSession implements StreamingSession {
     required ValueChanged<String> onStatusChanged,
     required ValueChanged<bool> onBusyChanged,
     required ValueChanged<String> onPhaseChanged,
-  })  : _audioInputService = audioInputService,
-        _speechRecognizer = speechRecognizer,
-        _translationEngine = translationEngine,
-        _ttsService = ttsService,
-        _vadService = vadService,
-        _settings = settings,
-        _onStatusChanged = onStatusChanged,
-        _onBusyChanged = onBusyChanged,
-        _onPhaseChanged = onPhaseChanged;
+  }) : _audioInputService = audioInputService,
+       _speechRecognizer = speechRecognizer,
+       _translationEngine = translationEngine,
+       _ttsService = ttsService,
+       _vadService = vadService,
+       _settings = settings,
+       _onStatusChanged = onStatusChanged,
+       _onBusyChanged = onBusyChanged,
+       _onPhaseChanged = onPhaseChanged;
+
+  /// Hard cap on one buffered utterance (~30s at 16 kHz PCM16) so a long
+  /// stretch of continuous speech cannot exhaust memory.
+  static const int maxBufferBytes = 16000 * 2 * 30;
+
+  /// Silence after the last detected speech chunk that closes an utterance.
+  static const Duration trailingSilence = Duration(milliseconds: 600);
 
   final AudioInputService _audioInputService;
   final SpeechRecognizer _speechRecognizer;
@@ -42,18 +51,26 @@ class ContinuousStreamingSession implements StreamingSession {
   final ValueChanged<bool> _onBusyChanged;
   final ValueChanged<String> _onPhaseChanged;
 
-  final StreamController<ConversationMessage> _messageController =
+  StreamController<ConversationMessage> _messageController =
       StreamController<ConversationMessage>();
 
   bool _isActive = false;
+  bool _isStopping = false;
 
   @override
   Stream<ConversationMessage> start() {
     if (_isActive) {
       return _messageController.stream;
     }
+
+    // A previous run closes the controller to signal completion. Recreate it so
+    // the session can be started again.
+    if (_messageController.isClosed) {
+      _messageController = StreamController<ConversationMessage>();
+    }
+    _isStopping = false;
     _isActive = true;
-    _runLoop();
+    unawaited(_runLoop());
     return _messageController.stream;
   }
 
@@ -65,94 +82,144 @@ class ContinuousStreamingSession implements StreamingSession {
       final iterator = StreamIterator<List<int>>(micStream);
       final buffer = AudioBuffer();
 
-      while (_isActive && await iterator.moveNext()) {
-        final chunk = iterator.current;
-
-        final hasSpeech = await _vadService.detectSpeech(chunk);
-        if (!_isActive) break;
-
-        if (!hasSpeech) {
-          continue;
-        }
-
-        _onPhaseChanged('listening');
-        _onStatusChanged('Speech detected, listening...');
-
-        buffer.add(chunk);
-
+      try {
         while (_isActive && await iterator.moveNext()) {
-          final nextChunk = iterator.current;
-          buffer.add(nextChunk);
+          final chunk = iterator.current;
+          if (chunk.isEmpty) {
+            continue;
+          }
 
-          final stillSpeech = await _vadService.detectSpeech(nextChunk);
+          final hasSpeech = await _vadService.detectSpeech(chunk);
           if (!_isActive) break;
 
-          if (!stillSpeech) {
-            await Future.delayed(const Duration(milliseconds: 300));
+          if (!hasSpeech) {
+            continue;
+          }
+
+          _onPhaseChanged('listening');
+          _onStatusChanged('Speech detected, listening...');
+
+          buffer.add(chunk);
+          var lastSpeechAt = DateTime.now();
+
+          while (_isActive && await iterator.moveNext()) {
+            final nextChunk = iterator.current;
+            if (nextChunk.isNotEmpty) {
+              buffer.add(nextChunk);
+            }
+
+            final stillSpeech = await _vadService.detectSpeech(nextChunk);
             if (!_isActive) break;
 
-            if (await iterator.moveNext()) {
-              final silenceChunk = iterator.current;
-              buffer.add(silenceChunk);
+            if (stillSpeech) {
+              lastSpeechAt = DateTime.now();
+            } else if (DateTime.now().difference(lastSpeechAt) >=
+                trailingSilence) {
+              break;
             }
-            break;
+
+            if (buffer.length >= maxBufferBytes) {
+              _onStatusChanged('Utterance is too long, splitting it up.');
+              break;
+            }
+          }
+
+          if (!_isActive) break;
+          if (buffer.isEmpty) continue;
+
+          final transcript = (await _runStep(
+            'transcribing',
+            'Transcribing...',
+            () => _speechRecognizer.transcribe(
+              audioData: buffer.toList(),
+              language: _settings.sourceLanguage,
+              model: _settings.speechModel,
+            ),
+          ))?.trim();
+          buffer.clear();
+          if (!_isActive) break;
+
+          if (transcript == null || transcript.isEmpty) {
+            continue;
+          }
+
+          final translation = (await _runStep(
+            'translating',
+            'Translating...',
+            () => _translationEngine.translate(
+              transcript,
+              from: _settings.sourceLanguage,
+              to: _settings.targetLanguage,
+            ),
+          ))?.trim();
+          if (!_isActive) break;
+
+          if (translation == null || translation.isEmpty) {
+            continue;
+          }
+
+          final shouldSpeak =
+              _settings.mode == InterpreterMode.conversation &&
+              _settings.voicePlaybackEnabled;
+
+          if (!_messageController.isClosed) {
+            _messageController.add(
+              ConversationMessage(
+                sourceLanguage: _settings.sourceLanguage,
+                targetLanguage: _settings.targetLanguage,
+                transcript: transcript,
+                translation: translation,
+                createdAt: DateTime.now(),
+                latency: const Duration(milliseconds: 800),
+                spoken: shouldSpeak,
+              ),
+            );
+          }
+
+          if (shouldSpeak) {
+            _onPhaseChanged('speaking');
+            _onStatusChanged('Speaking translation...');
+            try {
+              await _ttsService.speak(
+                translation,
+                language: _settings.targetLanguage,
+              );
+            } catch (_) {}
           }
         }
-
-        if (!_isActive) break;
-        if (buffer.isEmpty) continue;
-
-        _onPhaseChanged('transcribing');
-        _onStatusChanged('Transcribing...');
-        final transcript = await _speechRecognizer.transcribe(
-          audioData: buffer.toList(),
-          language: _settings.sourceLanguage,
-          model: _settings.speechModel,
-        );
-        buffer.clear();
-        if (!_isActive) break;
-
-        _onPhaseChanged('translating');
-        _onStatusChanged('Translating...');
-        final translation = await _translationEngine.translate(
-          transcript,
-          from: _settings.sourceLanguage,
-          to: _settings.targetLanguage,
-        );
-        if (!_isActive) break;
-
-        final shouldSpeak =
-            _settings.mode == InterpreterMode.conversation &&
-            _settings.voicePlaybackEnabled;
-
-        final message = ConversationMessage(
-          sourceLanguage: _settings.sourceLanguage,
-          targetLanguage: _settings.targetLanguage,
-          transcript: transcript,
-          translation: translation,
-          createdAt: DateTime.now(),
-          latency: const Duration(milliseconds: 800),
-          spoken: shouldSpeak,
-        );
-
-        _messageController.add(message);
-
-        if (shouldSpeak) {
-          _onPhaseChanged('speaking');
-          _onStatusChanged('Speaking translation...');
-          await _ttsService.speak(translation, language: _settings.targetLanguage);
-        }
+      } finally {
+        await iterator.cancel();
       }
-    } catch (e) {
-      _onStatusChanged('Session error: $e');
+    } catch (error) {
+      _onStatusChanged('Session error: $error');
     } finally {
       await stop();
     }
   }
 
+  /// Runs one pipeline step, reporting phase and status. Returns null when the
+  /// step fails so a single bad utterance cannot kill the whole session.
+  Future<String?> _runStep(
+    String phase,
+    String status,
+    Future<String> Function() action,
+  ) async {
+    _onPhaseChanged(phase);
+    _onStatusChanged(status);
+    try {
+      return await action();
+    } catch (error) {
+      _onStatusChanged('$status failed: $error');
+      return null;
+    }
+  }
+
   @override
   Future<void> stop() async {
-    if (!_isActive) return;
+    if (!_isActive || _isStopping) {
+      return;
+    }
+    _isStopping = true;
     _isActive = false;
 
     await _audioInputService.close();

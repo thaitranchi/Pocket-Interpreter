@@ -11,7 +11,9 @@ enum OfflineModelType {
 
 enum OfflineModelStatus {
   installed('Installed'),
+  downloading('Downloading'),
   missing('Missing'),
+  failed('Download failed'),
   optional('Optional');
 
   const OfflineModelStatus(this.label);
@@ -26,6 +28,7 @@ class OfflineModel {
     required this.type,
     required this.sizeMb,
     required this.status,
+    this.progress = 0,
   });
 
   final String id;
@@ -34,8 +37,27 @@ class OfflineModel {
   final int sizeMb;
   final OfflineModelStatus status;
 
+  /// 0..1 while [status] is [OfflineModelStatus.downloading].
+  final double progress;
+
   bool get isReady {
     return status == OfflineModelStatus.installed ||
         status == OfflineModelStatus.optional;
+  }
+
+  bool get isBusy => status == OfflineModelStatus.downloading;
+
+  OfflineModel copyWith({
+    OfflineModelStatus? status,
+    double? progress,
+  }) {
+    return OfflineModel(
+      id: id,
+      name: name,
+      type: type,
+      sizeMb: sizeMb,
+      status: status ?? this.status,
+      progress: progress ?? this.progress,
+    );
   }
 }

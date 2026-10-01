@@ -1,12 +1,13 @@
-import 'package:flutter/widgets.dart';
 import 'package:google_mlkit_translation/google_mlkit_translation.dart';
+
 import '../conversation/language.dart';
+import '../models/model_download_coordinator.dart';
 import 'translation_engine.dart';
 
-class MlKitTranslationEngine implements TranslationEngine {
+class MlKitTranslationEngine
+    implements TranslationEngine, TranslationModelPreparer {
   MlKitTranslationEngine({OnDeviceTranslatorModelManager? modelManager})
-      : _modelManager =
-            modelManager ?? OnDeviceTranslatorModelManager();
+    : _modelManager = modelManager ?? OnDeviceTranslatorModelManager();
 
   final OnDeviceTranslatorModelManager _modelManager;
 
@@ -19,23 +20,34 @@ class MlKitTranslationEngine implements TranslationEngine {
     };
   }
 
-  bool _isTestEnvironment() {
-    if (const bool.fromEnvironment('ENABLE_REAL_ENGINES')) {
-      return false;
+  Future<void> _ensureModelDownloaded(
+    String bcpCode, {
+    void Function(double progress)? onProgress,
+  }) async {
+    if (await _modelManager.isModelDownloaded(bcpCode)) {
+      onProgress?.call(1);
+      return;
     }
-    try {
-      final bindingStr = WidgetsBinding.instance.toString();
-      if (bindingStr.contains('Test')) {
-        return true;
-      }
-    } catch (_) {}
-    return false;
+    await _modelManager.downloadModel(bcpCode);
+    onProgress?.call(1);
   }
 
-  Future<void> _ensureModelDownloaded(String bcpCode) async {
-    final isDownloaded = await _modelManager.isModelDownloaded(bcpCode);
-    if (!isDownloaded) {
-      await _modelManager.downloadModel(bcpCode);
+  @override
+  Future<void> prepareTranslationModels(
+    SupportedLanguage from,
+    SupportedLanguage to, {
+    void Function(double progress)? onProgress,
+  }) async {
+    final codes = <String>{
+      _toTranslateLanguage(from).bcpCode,
+      _toTranslateLanguage(to).bcpCode,
+    }.toList();
+
+    for (var i = 0; i < codes.length; i++) {
+      await _ensureModelDownloaded(
+        codes[i],
+        onProgress: (value) => onProgress?.call((i + value) / codes.length),
+      );
     }
   }
 
@@ -45,7 +57,7 @@ class MlKitTranslationEngine implements TranslationEngine {
     required SupportedLanguage from,
     required SupportedLanguage to,
   }) async {
-    if (_isTestEnvironment() || from == to) {
+    if (text.trim().isEmpty || from == to) {
       return text;
     }
 
@@ -56,15 +68,27 @@ class MlKitTranslationEngine implements TranslationEngine {
     await _ensureModelDownloaded(source.bcpCode);
     await _ensureModelDownloaded(target.bcpCode);
 
-    final translator =
-        _translators.putIfAbsent(
-            pair,
-            () => OnDeviceTranslator(
-              sourceLanguage: source,
-              targetLanguage: target,
-            ));
+    final translator = _translators.putIfAbsent(
+      pair,
+      () => OnDeviceTranslator(
+        sourceLanguage: source,
+        targetLanguage: target,
+      ),
+    );
 
     return translator.translateText(text);
+  }
+
+  /// Releases the native translators. Required to avoid leaking native
+  /// handles across long-running sessions.
+  Future<void> dispose() async {
+    final translators = _translators.values.toList();
+    _translators.clear();
+    for (final translator in translators) {
+      try {
+        await translator.close();
+      } catch (_) {}
+    }
   }
 }
 

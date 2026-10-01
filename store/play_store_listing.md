@@ -21,10 +21,9 @@ PRIVATE BY DESIGN
 • No account, no tracking
 • Microphone is used only while you are actively translating
 
-FREE EVERY DAY, GO PRO ONCE
-• Free: unlimited text translation + 5 minutes of voice interpretation per day, with a small banner ad
-• Pro (one-time purchase, no subscription): unlimited voice interpretation, no ads, priority processing, and advanced features
-• Pay once, own it forever — no monthly fees
+COMPLETELY FREE, FULLY UNLOCKED
+• Every feature is available from first launch: push-to-talk, continuous mode, live subtitles, and all offline speech models
+• No ads, no subscriptions, and no in-app purchases
 
 BUILT FOR TRAVEL AND DAILY USE
 • Perfect for travel, work meetings, or talking with family and friends
@@ -51,14 +50,12 @@ store/app_icon_512.png (512x512, PNG)
 
 ## Screenshots (phone, 1080x1920 · 9:16)
 Generated from the real app UI (in store/screenshots/):
-1. phone-home-free.png — Free tier home, EN→VI, push-to-talk
-2. phone-home-pro.png — Pro active, all speech models unlocked
-3. phone-conversation.png — conversation with translations
-4. phone-continuous.png — continuous mode
+1. phone-home.png — home, EN→VI, push-to-talk
+2. phone-conversation.png — conversation with translations
+3. phone-continuous.png — continuous mode
 
 ## Screenshots (tablet, 1920x1080 · 16:9)
-1. tablet-home-free.png
-2. tablet-home-pro.png
+1. tablet-home.png
 
 Regenerate anytime with:
 ```bash
@@ -71,10 +68,8 @@ Complete the IARC questionnaire in Play Console.
 Expected answers: not violent, no sexual content, no gambling, no user-interaction chat concerns beyond on-device voice (offline, no data sharing).
 
 ## Monetization & ads
-- Business model: Free (with banner ads) + Pro one-time purchase.
-- In-app products: one-time "Pro" purchase to remove ads and unlock unlimited voice.
-- Note: because Google Mobile Ads (AdMob) is integrated, Google Play may flag the app as
-  using a Google service — disclose this in the Data Safety form (advertising ID).
+- Business model: completely free. No ads, no in-app purchases, no subscriptions.
+- The app integrates no advertising or billing SDKs.
 
 ## Privacy policy
 Host the privacy policy at a public URL (required unless using Play Console's built-in option).
@@ -83,6 +78,5 @@ Full text below in store/privacy_policy.html.
 
 ## Data safety form (Play Console)
 - Translation/voice content: NOT collected or shared (processed on-device).
-- Advertising ID: YES — collected by AdMob for serving ads on the Free tier. Select the
-  appropriate "Ads" option and point to the privacy policy URL.
-- Note: the current privacy_policy.html states "no ads" — update it to disclose ads before release.
+- No advertising ID is collected (the app has no advertising SDK).
+- No account, no analytics, no tracking.

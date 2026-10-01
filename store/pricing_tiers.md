@@ -2,52 +2,30 @@
 
 ## Business model
 
-**Free (with ads) + Pro one-time purchase ("Pay once, own forever").**
+**Completely free — everything unlocked.**
 
-No recurring subscription. Free tier is monetized with a banner ad; Pro is a single
-one-time purchase that unlocks everything and removes ads. Offline-first users
-prefer lifetime ownership over monthly fees.
+Pocket Interpreter has no ads, no subscriptions, and no in-app purchases. Every feature is
+available from the first launch, including all speech model profiles (`tiny` / `base` /
+`small`), push-to-talk, continuous mode, live subtitles, and offline translation.
 
-## Free Tier
-
-| Feature | Included |
-|---|---|
-| Standard text translation | ✅ |
-| Limited daily voice/audio credits | 5 minutes/day |
-| Basic common language pairs | ✅ |
-| Banner ad | Shown while using the free tier |
-
-**Target user:** Casual users, travelers doing quick lookups
-
-## Pro Tier (one-time purchase, $4.99 – $14.99)
+## Feature availability
 
 | Feature | Included |
 |---|---|
-| Unlimited real-time voice interpretation | ✅ |
-| No ads | ✅ |
-| Offline translation models | ✅ |
-| High-speed processing / low latency | ✅ |
-| Advanced features (document/camera OCR, specialized jargon domain) | ✅ |
+| Real-time voice interpretation (push-to-talk) | ✅ |
+| Continuous / hands-free mode | ✅ |
+| Live subtitles with spoken translation playback | ✅ |
+| All offline speech model profiles (`tiny` / `base` / `small`) | ✅ |
+| On-device ML Kit translation | ✅ |
+| Voice activity detection (energy gate) | ✅ |
+| Conversation history with latency metadata | ✅ |
+| Ads | None |
+| Subscriptions / in-app purchases | None |
 
-**Target user:** Business travelers, expats, daily power users
+## Notes
 
-## Revenue strategy notes
-
-- The banner ad on the Free tier converts light daily usage without demanding a purchase.
-- The one-time Pro price (recommended $6.99–$9.99, per Play Store fee tiers) is a single
-  "buy once, own forever" invoice with Google Play Billing.
-- Text translation stays free to keep casual users engaged; voice minutes are the
-  premium driver.
-- AdMob App ID is currently a placeholder (`ca-app-pub-3940256099942544~3347511713`,
-  Google's test ID) — replace with the real AdMob App ID before production release.
-
-## Play Billing wiring (implemented)
-
-| Item | Value |
-|---|---|
-| Plugin | `in_app_purchase` (`lib/monetization/pro_purchase_service.dart`) |
-| Product id | `pro_unlock` (non-consumable, one-time) |
-| Purchase flow | `ProPurchaseService.startPurchase()` → Play purchase dialog |
-| Verification | `purchaseStream` — on `purchased`/`restored`, `Entitlements.upgradeToPro()` persists locally |
-| Graceful fallback | Billing unavailable → SnackBar; tests/emulators without Play fall back to local unlock |
-| To activate | In Play Console create a non-consumable product with id **`pro_unlock`** (price ~$6.99) — code needs no change |
+- The app is private by design: no account, no analytics, no advertising ID.
+- Network access is used only to download the offline speech and ML Kit translation models
+  on first use.
+- There is no billing integration in the codebase; adding one would require reintroducing a
+  billing SDK and entitlement gating.

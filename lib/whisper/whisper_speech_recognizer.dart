@@ -1,15 +1,18 @@
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:flutter/widgets.dart';
+
 import 'package:path_provider/path_provider.dart';
 import 'package:whisper_ggml/whisper_ggml.dart';
+
 import '../conversation/conversation_settings.dart';
 import '../conversation/language.dart';
+import '../models/model_download_coordinator.dart';
 import 'speech_recognizer.dart';
 
-class WhisperSpeechRecognizer implements SpeechRecognizer {
+class WhisperSpeechRecognizer
+    implements SpeechRecognizer, SpeechModelPreparer {
   WhisperSpeechRecognizer({WhisperController? controller})
-      : _controller = controller ?? WhisperController();
+    : _controller = controller ?? WhisperController();
 
   final WhisperController _controller;
 
@@ -19,24 +22,6 @@ class WhisperSpeechRecognizer implements SpeechRecognizer {
       SpeechModelProfile.base => WhisperModel.base,
       SpeechModelProfile.smallInt8 => WhisperModel.small,
     };
-  }
-
-  bool _isTestEnvironment() {
-    if (const bool.fromEnvironment('ENABLE_REAL_ENGINES')) {
-      return false;
-    }
-    try {
-      if (Platform.environment.containsKey('FLUTTER_TEST')) {
-        return true;
-      }
-    } catch (_) {}
-    try {
-      final bindingStr = WidgetsBinding.instance.toString();
-      if (bindingStr.contains('Test')) {
-        return true;
-      }
-    } catch (_) {}
-    return false;
   }
 
   static Uint8List _toWav(List<int> pcm, {int sampleRate = 16000}) {
@@ -73,33 +58,73 @@ class WhisperSpeechRecognizer implements SpeechRecognizer {
     return builder.toBytes();
   }
 
+  @override
+  Future<void> prepareSpeechModel(
+    SpeechModelProfile profile, {
+    void Function(double progress)? onProgress,
+  }) {
+    return _ensureModelDownloaded(
+      _controller,
+      _toWhisperModel(profile),
+      onProgress: onProgress,
+    );
+  }
+
   static Future<void> _ensureModelDownloaded(
     WhisperController controller,
-    WhisperModel model,
-  ) async {
+    WhisperModel model, {
+    void Function(double progress)? onProgress,
+  }) async {
     final modelPath = await controller.getPath(model);
     if (File(modelPath).existsSync()) {
+      onProgress?.call(1);
       return;
     }
 
     final tempPath = '$modelPath.partial';
-    final request = await HttpClient().getUrl(model.modelUri);
-    final response = await request.close();
-    if (response.statusCode != HttpStatus.ok) {
-      throw HttpException(
-        'Failed to download whisper model ${model.modelName}: '
-        'HTTP ${response.statusCode}',
-        uri: model.modelUri,
-      );
+    final partial = File(tempPath);
+    if (await partial.exists()) {
+      await partial.delete();
     }
 
-    final sink = File(tempPath).openWrite();
+    final client = HttpClient();
     try {
-      await response.pipe(sink);
-    } finally {
+      final request = await client.getUrl(model.modelUri);
+      final response = await request.close();
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException(
+          'Failed to download whisper model ${model.modelName}: '
+          'HTTP ${response.statusCode}',
+          uri: model.modelUri,
+        );
+      }
+
+      final total = response.contentLength;
+      var received = 0;
+      final sink = partial.openWrite();
+      try {
+        await for (final block in response) {
+          sink.add(block);
+          received += block.length;
+          if (total > 0) {
+            onProgress?.call(received / total);
+          }
+        }
+        await sink.flush();
+      } catch (_) {
+        await sink.close();
+        if (await partial.exists()) {
+          await partial.delete();
+        }
+        rethrow;
+      }
       await sink.close();
+    } finally {
+      client.close(force: true);
     }
-    await File(tempPath).rename(modelPath);
+
+    await partial.rename(modelPath);
+    onProgress?.call(1);
   }
 
   @override
@@ -108,13 +133,6 @@ class WhisperSpeechRecognizer implements SpeechRecognizer {
     required SupportedLanguage language,
     required SpeechModelProfile model,
   }) async {
-    if (_isTestEnvironment()) {
-      return switch (language) {
-        SupportedLanguage.english => 'Hello, can you help me find the station?',
-        SupportedLanguage.vietnamese => 'Xin chao, ban co the giup toi khong?',
-      };
-    }
-
     if (audioData.isEmpty) {
       return '';
     }
@@ -123,7 +141,10 @@ class WhisperSpeechRecognizer implements SpeechRecognizer {
     await _ensureModelDownloaded(_controller, whisperModel);
 
     final directory = await getTemporaryDirectory();
-    final file = File('${directory.path}/pocket_interpreter_capture.wav');
+    final file = File(
+      '${directory.path}/pocket_interpreter_capture_'
+      '${DateTime.now().microsecondsSinceEpoch}.wav',
+    );
     await file.writeAsBytes(_toWav(audioData));
 
     try {
@@ -141,4 +162,7 @@ class WhisperSpeechRecognizer implements SpeechRecognizer {
       }
     }
   }
+
+  /// Frees the model parked in native memory by `keepModelLoaded: true`.
+  Future<void> dispose() => _controller.releaseModel();
 }

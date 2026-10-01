@@ -1,85 +1,106 @@
 import 'dart:async';
-import 'dart:io';
-import 'package:flutter/widgets.dart';
+
 import 'package:record/record.dart';
+
 import 'audio_input_service.dart';
 
+/// PCM16 mono at 16 kHz. The Whisper front-end and [EnergyVadService] both
+/// assume this format, so the recorder must be configured to match.
+const int kCaptureSampleRate = 16000;
+const int kCaptureBytesPerSample = 2;
+
+class MicrophonePermissionDenied implements Exception {
+  const MicrophonePermissionDenied();
+
+  @override
+  String toString() => 'Microphone permission denied';
+}
+
+/// Records from the device microphone via `record`.
+///
+/// The service is reusable: every [openMicrophoneStream] call creates a fresh
+/// [AudioRecorder] and [close] releases it, leaving the service ready for the
+/// next recording. Callers are responsible for calling [close].
 class RecordAudioInputService implements AudioInputService {
-  RecordAudioInputService() : _recorder = AudioRecorder();
-
-  final AudioRecorder _recorder;
-  bool _isClosed = false;
-
-  bool _isTestEnvironment() {
-    try {
-      if (Platform.environment.containsKey('FLUTTER_TEST')) {
-        return true;
-      }
-    } catch (_) {}
-    try {
-      // In a widget test, WidgetsBinding.instance is an instance of TestWidgetsFlutterBinding
-      final bindingStr = WidgetsBinding.instance.toString();
-      if (bindingStr.contains('Test')) {
-        return true;
-      }
-    } catch (_) {}
-    return false;
-  }
+  AudioRecorder? _recorder;
+  StreamController<List<int>>? _controller;
+  StreamSubscription<List<int>>? _subscription;
 
   @override
   Stream<List<int>> openMicrophoneStream() {
-    if (_isClosed) {
-      throw StateError('AudioInputService is closed');
-    }
-
-    if (_isTestEnvironment()) {
-      debugPrint('RecordAudioInputService: Running in test environment, using mock stream.');
-      return Stream.value(List.filled(320, 64));
+    if (_controller != null) {
+      throw StateError('A microphone stream is already open');
     }
 
     final controller = StreamController<List<int>>();
-
-    Future<void> start() async {
-      try {
-        if (await _recorder.hasPermission()) {
-          final stream = await _recorder.startStream(const RecordConfig(
-            encoder: AudioEncoder.pcm16bits,
-            sampleRate: 16000,
-            numChannels: 1,
-          ));
-          
-          // Pipe the Uint8List stream to the controller
-          await controller.addStream(stream);
-        } else {
-          controller.addError(Exception('Microphone permission denied'));
-          await controller.close();
-        }
-      } catch (e) {
-        // Degrade gracefully for test environments or platform errors
-        debugPrint('RecordAudioInputService: Failed to open stream: $e');
-        controller.addError(e);
-        await controller.close();
-      }
-    }
-
-    start();
+    _controller = controller;
+    unawaited(_start(controller));
     return controller.stream;
   }
 
+  Future<void> _start(StreamController<List<int>> controller) async {
+    AudioRecorder? recorder;
+    try {
+      recorder = AudioRecorder();
+      if (!await recorder.hasPermission()) {
+        throw const MicrophonePermissionDenied();
+      }
+
+      final stream = await recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: kCaptureSampleRate,
+          numChannels: 1,
+        ),
+      );
+
+      if (controller.isClosed) {
+        await recorder.dispose();
+        return;
+      }
+
+      _recorder = recorder;
+      _subscription = stream.listen(
+        controller.add,
+        onError: controller.addError,
+      );
+    } catch (error, stack) {
+      await recorder?.dispose();
+      if (!controller.isClosed) {
+        controller.addError(error, stack);
+        await controller.close();
+      }
+      if (identical(_controller, controller)) {
+        _controller = null;
+      }
+    }
+  }
+
+  /// Stops the active recording and releases the recorder so that the service
+  /// can be opened again.
   @override
   Future<void> close() async {
-    if (_isClosed) return;
-    _isClosed = true;
+    final controller = _controller;
+    final subscription = _subscription;
+    final recorder = _recorder;
 
-    if (_isTestEnvironment()) {
-      return;
+    _controller = null;
+    _subscription = null;
+    _recorder = null;
+
+    await subscription?.cancel();
+
+    if (recorder != null) {
+      try {
+        if (await recorder.isRecording()) {
+          await recorder.stop();
+        }
+      } catch (_) {}
+      await recorder.dispose();
     }
 
-    try {
-      await _recorder.stop();
-      await _recorder.dispose();
-    } catch (e) {
-      debugPrint('RecordAudioInputService: Error closing: $e');
+    if (controller != null && !controller.isClosed) {
+      await controller.close();
     }
   }
 }

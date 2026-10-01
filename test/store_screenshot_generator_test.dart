@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -10,8 +9,6 @@ import 'package:pocket_interpreter/conversation/conversation_controller.dart';
 import 'package:pocket_interpreter/conversation/conversation_message.dart';
 import 'package:pocket_interpreter/conversation/conversation_settings.dart';
 import 'package:pocket_interpreter/conversation/language.dart';
-import 'package:pocket_interpreter/entitlements/entitlements.dart';
-import 'package:pocket_interpreter/entitlements/entitlement_storage.dart';
 import 'package:pocket_interpreter/models/model_inventory.dart';
 import 'package:pocket_interpreter/translation/translation_engine.dart';
 import 'package:pocket_interpreter/tts/tts_service.dart';
@@ -29,15 +26,13 @@ void main() {
     tester.view.devicePixelRatio = 3.0;
     addTearDown(tester.view.reset);
 
-    final free = _controller();
-    final pro = _controller(isPro: true);
+    final home = _controller();
     final conversation = _controller();
     _injectMessages(conversation);
     final continuous = _controller(mode: InterpreterMode.conversation);
     _injectMessages(continuous);
 
-    await _shot(tester, free, 'phone-home-free');
-    await _shot(tester, pro, 'phone-home-pro');
+    await _shot(tester, home, 'phone-home');
     await _shot(tester, conversation, 'phone-conversation');
     await _shot(tester, continuous, 'phone-continuous');
   });
@@ -47,8 +42,7 @@ void main() {
     tester.view.devicePixelRatio = 1.5;
     addTearDown(tester.view.reset);
 
-    await _shot(tester, _controller(isPro: true), 'tablet-home-pro');
-    await _shot(tester, _controller(), 'tablet-home-free');
+    await _shot(tester, _controller(), 'tablet-home');
   });
 }
 
@@ -74,16 +68,8 @@ Future<void> _loadFonts() async {
 }
 
 ConversationController _controller({
-  bool isPro = false,
   InterpreterMode mode = InterpreterMode.pushToTalk,
 }) {
-  final entitlements = Entitlements(
-    storage: MemoryEntitlementStorage(),
-    freeDailyVoiceMinutes: 5,
-  );
-  if (isPro) {
-    unawaited(entitlements.upgradeToPro());
-  }
   final controller = ConversationController(
     audioInputService: const _FakeAudioInputService(),
     speechRecognizer: const _FakeSpeechRecognizer(),
@@ -91,11 +77,7 @@ ConversationController _controller({
     ttsService: const _FakeTtsService(),
     vadService: const _FakeVadService(),
     modelInventory: ModelInventory.mvpDefaults(),
-    entitlements: entitlements,
   );
-  if (isPro) {
-    controller.setSpeechModel(SpeechModelProfile.base);
-  }
   if (mode != InterpreterMode.pushToTalk) {
     controller.setMode(mode);
   }

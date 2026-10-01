@@ -1,16 +1,17 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../audio/audio_buffer.dart';
 import '../audio/audio_input_service.dart';
-import '../entitlements/entitlements.dart';
-import '../streaming/streaming_session.dart';
+import '../audio/record_audio_input_service.dart';
+import '../models/model_inventory.dart';
 import '../streaming/continuous_streaming_session.dart';
+import '../streaming/streaming_session.dart';
 import '../translation/translation_engine.dart';
 import '../tts/tts_service.dart';
 import '../vad/vad_service.dart';
 import '../whisper/speech_recognizer.dart';
-import '../models/model_inventory.dart';
 import 'conversation_message.dart';
 import 'conversation_settings.dart';
 import 'language.dart';
@@ -36,17 +37,12 @@ class ConversationController extends ChangeNotifier {
     required TtsService ttsService,
     required VadService vadService,
     required ModelInventory modelInventory,
-    Entitlements? entitlements,
   }) : _audioInputService = audioInputService,
        _speechRecognizer = speechRecognizer,
        _translationEngine = translationEngine,
        _ttsService = ttsService,
        _vadService = vadService,
-       _modelInventory = modelInventory,
-       _entitlements = entitlements ?? Entitlements(),
-       _ownsEntitlements = entitlements == null {
-    _entitlements.addListener(_onEntitlementsChanged);
-  }
+       _modelInventory = modelInventory;
 
   final AudioInputService _audioInputService;
   final SpeechRecognizer _speechRecognizer;
@@ -54,8 +50,6 @@ class ConversationController extends ChangeNotifier {
   final TtsService _ttsService;
   final VadService _vadService;
   final ModelInventory _modelInventory;
-  final Entitlements _entitlements;
-  final bool _ownsEntitlements;
 
   final List<ConversationMessage> _messages = [];
 
@@ -63,7 +57,20 @@ class ConversationController extends ChangeNotifier {
   InterpreterPhase _phase = InterpreterPhase.idle;
   String _status = 'Ready for offline interpreting';
   StreamingSession? _activeSession;
-  Timer? _usageTimer;
+  bool _releaseRequested = false;
+  bool _isDisposed = false;
+
+  /// Trailing silence after the last detected speech chunk that ends an
+  /// utterance.
+  static const Duration pushToTalkTrailingSilence = Duration(
+    milliseconds: 700,
+  );
+
+  /// Upper bound on a single push-to-talk capture.
+  static const Duration pushToTalkMaxDuration = Duration(seconds: 12);
+
+  /// Lower bound, so a single loud syllable is not treated as a full phrase.
+  static const Duration pushToTalkMinDuration = Duration(milliseconds: 800);
 
   List<ConversationMessage> get messages => List.unmodifiable(_messages);
   ConversationSettings get settings => _settings;
@@ -72,12 +79,11 @@ class ConversationController extends ChangeNotifier {
   String get status => _status;
   ModelInventory get modelInventory => _modelInventory;
   bool get isReady => _modelInventory.isReady;
-  Entitlements get entitlements => _entitlements;
 
-  static const limitReachedStatus =
-      'Daily voice limit reached. Upgrade to Pro for unlimited interpreting';
-
-  void _onEntitlementsChanged() {
+  void _notify() {
+    if (_isDisposed) {
+      return;
+    }
     notifyListeners();
   }
 
@@ -92,7 +98,7 @@ class ConversationController extends ChangeNotifier {
     _status =
         'Direction changed to ${_settings.sourceLanguage.label} -> '
         '${_settings.targetLanguage.label}';
-    notifyListeners();
+    _notify();
   }
 
   void setSourceLanguage(SupportedLanguage language) {
@@ -107,7 +113,7 @@ class ConversationController extends ChangeNotifier {
           : _settings.targetLanguage,
     );
     _status = 'Source language set to ${_settings.sourceLanguage.label}';
-    notifyListeners();
+    _notify();
   }
 
   void setTargetLanguage(SupportedLanguage language) {
@@ -122,155 +128,225 @@ class ConversationController extends ChangeNotifier {
       targetLanguage: language,
     );
     _status = 'Target language set to ${_settings.targetLanguage.label}';
-    notifyListeners();
+    _notify();
   }
 
   void setMode(InterpreterMode mode) {
     if (isStreaming) {
-      stopStreaming();
+      unawaited(stopStreaming());
     }
     _settings = _settings.copyWith(mode: mode);
     _status = '${mode.label} enabled';
-    notifyListeners();
+    _notify();
   }
 
   void setSpeechModel(SpeechModelProfile model) {
-    if (!_entitlements.canAccess(model)) {
-      _status = '${model.label} speech model is a Pro feature';
-      notifyListeners();
-      return;
-    }
     _settings = _settings.copyWith(speechModel: model);
     _status = '${model.label} speech model selected';
-    notifyListeners();
+    _notify();
   }
 
   void setVoicePlaybackEnabled(bool enabled) {
     _settings = _settings.copyWith(voicePlaybackEnabled: enabled);
     _status = enabled ? 'Voice playback enabled' : 'Voice playback muted';
-    notifyListeners();
+    _notify();
   }
 
   void clearHistory() {
     _messages.clear();
     _status = 'Conversation cleared';
-    notifyListeners();
+    _notify();
   }
 
   @visibleForTesting
   void injectMessage(ConversationMessage message) {
     _messages.insert(0, message);
-    notifyListeners();
+    _notify();
   }
 
-  Future<void> startPushToTalk() async {
+  /// Ends an in-flight push-to-talk capture early. Wired to the release of the
+  /// press-and-hold button so the capture length matches how long the user
+  /// actually held the button.
+  void requestPushToTalkRelease() {
+    _releaseRequested = true;
+  }
+
+  Future<void> startPushToTalk({Duration? maxDuration}) async {
     if (isBusy || isStreaming) {
       return;
     }
 
     if (!isReady) {
       _status = 'Install required offline models before interpreting';
-      notifyListeners();
-      return;
-    }
-
-    if (!_entitlements.canUseVoiceFeature()) {
-      _status = limitReachedStatus;
-      notifyListeners();
+      _notify();
       return;
     }
 
     final startedAt = DateTime.now();
+    _releaseRequested = false;
     _phase = InterpreterPhase.listening;
     _status = 'Listening...';
-    notifyListeners();
+    _notify();
 
-    StreamSubscription<List<int>>? micSub;
-    final buffer = AudioBuffer();
-
+    AudioBuffer buffer;
     try {
-      final micStream = _audioInputService.openMicrophoneStream();
-      micSub = micStream.listen((data) {
-        buffer.add(data);
-      });
-    } catch (e) {
-      _status = 'Microphone error: $e';
+      buffer = await _captureUtterance(maxDuration: maxDuration);
+    } on MicrophonePermissionDenied {
       _phase = InterpreterPhase.idle;
-      notifyListeners();
+      _status =
+          'Microphone permission denied. Enable it in system settings to '
+          'interpret speech.';
+      _notify();
+      return;
+    } catch (error) {
+      _phase = InterpreterPhase.idle;
+      _status = 'Microphone error: $error';
+      _notify();
       return;
     }
-
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-
-    await micSub.cancel();
-    await _audioInputService.close();
 
     if (buffer.isEmpty) {
       _phase = InterpreterPhase.idle;
-      _status = 'No audio captured';
-      notifyListeners();
+      _status = 'No audio captured. Check the microphone and try again.';
+      _notify();
       return;
     }
 
-    _phase = InterpreterPhase.detectingSpeech;
-    _status = 'Analyzing audio...';
-    notifyListeners();
+    try {
+      _phase = InterpreterPhase.detectingSpeech;
+      _status = 'Analyzing audio...';
+      _notify();
 
-    final hasSpeech = await _vadService.detectSpeech(buffer.toList());
-    if (!hasSpeech) {
+      final hasSpeech = await _vadService.detectSpeech(buffer.toList());
+      if (!hasSpeech) {
+        _status = 'No speech detected';
+        return;
+      }
+
+      _phase = InterpreterPhase.transcribing;
+      _status = 'Running local speech recognition...';
+      _notify();
+
+      final transcript = (await _speechRecognizer.transcribe(
+        audioData: buffer.toList(),
+        language: _settings.sourceLanguage,
+        model: _settings.speechModel,
+      ))
+          .trim();
+
+      if (transcript.isEmpty) {
+        _status = 'No speech recognised. Try again a little closer to the mic.';
+        return;
+      }
+
+      _phase = InterpreterPhase.translating;
+      _status = 'Translating offline...';
+      _notify();
+
+      final translation = (await _translationEngine.translate(
+        transcript,
+        from: _settings.sourceLanguage,
+        to: _settings.targetLanguage,
+      ))
+          .trim();
+
+      if (translation.isEmpty) {
+        _status = 'Translation came back empty. Try again.';
+        return;
+      }
+
+      final shouldSpeak =
+          _settings.mode == InterpreterMode.conversation &&
+          _settings.voicePlaybackEnabled;
+      final message = ConversationMessage(
+        sourceLanguage: _settings.sourceLanguage,
+        targetLanguage: _settings.targetLanguage,
+        transcript: transcript,
+        translation: translation,
+        createdAt: DateTime.now(),
+        latency: DateTime.now().difference(startedAt),
+        spoken: shouldSpeak,
+      );
+
+      _messages.insert(0, message);
+
+      if (shouldSpeak) {
+        _phase = InterpreterPhase.speaking;
+        _status = 'Playing translated voice...';
+        _notify();
+        await _ttsService.speak(translation, language: _settings.targetLanguage);
+      }
+
+      _status = 'Translated on device';
+    } catch (error) {
+      _status = _describeFailure(error);
+    } finally {
       _phase = InterpreterPhase.idle;
-      _status = 'No speech detected';
-      notifyListeners();
-      return;
+      _notify();
+    }
+  }
+
+  /// Records until the utterance ends, the caller releases the button, the
+  /// microphone stream finishes, or [pushToTalkMaxDuration] is reached.
+  Future<AudioBuffer> _captureUtterance({Duration? maxDuration}) async {
+    final limit = maxDuration ?? pushToTalkMaxDuration;
+    final buffer = AudioBuffer();
+    final startedAt = DateTime.now();
+    DateTime? lastSpeechAt;
+    var heardSpeech = false;
+
+    final micStream = _audioInputService.openMicrophoneStream();
+    final iterator = StreamIterator<List<int>>(micStream);
+    try {
+      while (await iterator.moveNext()) {
+        final chunk = iterator.current;
+        if (chunk.isEmpty) {
+          continue;
+        }
+        buffer.add(chunk);
+
+        final now = DateTime.now();
+        final elapsed = now.difference(startedAt);
+        final isSpeech = await _vadService.detectSpeech(chunk);
+        if (isSpeech) {
+          heardSpeech = true;
+          lastSpeechAt = now;
+        } else if (heardSpeech &&
+            lastSpeechAt != null &&
+            elapsed >= pushToTalkMinDuration &&
+            now.difference(lastSpeechAt) >= pushToTalkTrailingSilence) {
+          break;
+        }
+
+        if (elapsed >= limit) {
+          _status =
+              'Reached the ${limit.inSeconds}s capture limit for one turn';
+          break;
+        }
+        if (_releaseRequested) {
+          break;
+        }
+      }
+    } finally {
+      await iterator.cancel();
+      await _audioInputService.close();
     }
 
-    _entitlements.consumeVoice(_audioDurationFor(buffer));
+    return buffer;
+  }
 
-    _phase = InterpreterPhase.transcribing;
-    _status = 'Running local speech recognition...';
-    notifyListeners();
-
-    final transcript = await _speechRecognizer.transcribe(
-      audioData: buffer.toList(),
-      language: _settings.sourceLanguage,
-      model: _settings.speechModel,
-    );
-
-    _phase = InterpreterPhase.translating;
-    _status = 'Translating offline...';
-    notifyListeners();
-
-    final translation = await _translationEngine.translate(
-      transcript,
-      from: _settings.sourceLanguage,
-      to: _settings.targetLanguage,
-    );
-
-    final shouldSpeak =
-        _settings.mode == InterpreterMode.conversation &&
-        _settings.voicePlaybackEnabled;
-    final message = ConversationMessage(
-      sourceLanguage: _settings.sourceLanguage,
-      targetLanguage: _settings.targetLanguage,
-      transcript: transcript,
-      translation: translation,
-      createdAt: DateTime.now(),
-      latency: DateTime.now().difference(startedAt),
-      spoken: shouldSpeak,
-    );
-
-    _messages.insert(0, message);
-
-    if (shouldSpeak) {
-      _phase = InterpreterPhase.speaking;
-      _status = 'Playing translated voice...';
-      notifyListeners();
-      await _ttsService.speak(translation, language: _settings.targetLanguage);
+  String _describeFailure(Object error) {
+    final text = error.toString();
+    if (text.contains('MlKitException') ||
+        text.contains('Translate') ||
+        text.contains('model')) {
+      return 'Translation failed. The offline model may be missing or '
+          'corrupt - reinstall it from the offline pack panel.';
     }
-
-    _phase = InterpreterPhase.idle;
-    _status = 'Translated on device';
-    notifyListeners();
+    if (text.contains('HttpException') || text.contains('SocketException')) {
+      return 'Model download failed. Check your connection and try again.';
+    }
+    return 'Interpreting failed: $error';
   }
 
   Future<void> startStreaming() async {
@@ -280,17 +356,10 @@ class ConversationController extends ChangeNotifier {
 
     if (!isReady) {
       _status = 'Install required offline models before interpreting';
-      notifyListeners();
+      _notify();
       return;
     }
 
-    if (!_entitlements.canUseVoiceFeature()) {
-      _status = limitReachedStatus;
-      notifyListeners();
-      return;
-    }
-
-    _startUsageTimer();
     final session = ContinuousStreamingSession(
       audioInputService: _audioInputService,
       speechRecognizer: _speechRecognizer,
@@ -298,10 +367,10 @@ class ConversationController extends ChangeNotifier {
       ttsService: _ttsService,
       vadService: _vadService,
       settings: _settings,
-      onBusyChanged: (busy) {},
+      onBusyChanged: (_) {},
       onStatusChanged: (status) {
         _status = status;
-        notifyListeners();
+        _notify();
       },
       onPhaseChanged: (phaseLabel) {
         _phase = switch (phaseLabel) {
@@ -311,73 +380,47 @@ class ConversationController extends ChangeNotifier {
           'speaking' => InterpreterPhase.speaking,
           _ => InterpreterPhase.idle,
         };
-        notifyListeners();
+        _notify();
       },
     );
 
     _activeSession = session;
-    notifyListeners();
+    _notify();
 
     session.start().listen(
       (message) {
         _messages.insert(0, message);
-        notifyListeners();
+        _notify();
       },
-      onError: (err) {
+      onError: (Object err) {
         _status = 'Session error: $err';
-        stopStreaming();
+        _phase = InterpreterPhase.idle;
+        unawaited(stopStreaming());
       },
       onDone: () {
-        stopStreaming();
+        unawaited(stopStreaming());
       },
     );
   }
 
   Future<void> stopStreaming() async {
-    if (_activeSession == null) {
+    final session = _activeSession;
+    if (session == null) {
       return;
     }
-    _cancelUsageTimer();
-    final session = _activeSession;
     _activeSession = null;
-    await session?.stop();
+    await session.stop();
     _phase = InterpreterPhase.idle;
     _status = 'Session stopped';
-    notifyListeners();
-  }
-
-  void _startUsageTimer() {
-    _cancelUsageTimer();
-    _usageTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _entitlements.consumeVoice(const Duration(seconds: 1));
-      if (!_entitlements.canUseVoiceFeature()) {
-        _status = limitReachedStatus;
-        notifyListeners();
-        stopStreaming();
-      }
-    });
-  }
-
-  void _cancelUsageTimer() {
-    _usageTimer?.cancel();
-    _usageTimer = null;
-  }
-
-  Duration _audioDurationFor(AudioBuffer buffer) {
-    const int sampleRate = 16000;
-    const int bytesPerSample = 2;
-    final seconds = buffer.length / (sampleRate * bytesPerSample);
-    return Duration(milliseconds: (seconds * 1000).round());
+    _notify();
   }
 
   @override
   void dispose() {
-    _cancelUsageTimer();
-    stopStreaming();
-    _entitlements.removeListener(_onEntitlementsChanged);
-    if (_ownsEntitlements) {
-      _entitlements.dispose();
-    }
+    _isDisposed = true;
+    final session = _activeSession;
+    _activeSession = null;
+    unawaited(session?.stop());
     super.dispose();
   }
 }

@@ -40,6 +40,10 @@ class ContinuousStreamingSession implements StreamingSession {
   /// Silence after the last detected speech chunk that closes an utterance.
   static const Duration trailingSilence = Duration(milliseconds: 600);
 
+  /// How long to discard mic audio after finishing an utterance so TTS playback
+  /// and decode backlog are not treated as the next phrase.
+  static const Duration postUtteranceFlush = Duration(milliseconds: 350);
+
   final AudioInputService _audioInputService;
   final SpeechRecognizer _speechRecognizer;
   final TranslationEngine _translationEngine;
@@ -77,6 +81,8 @@ class ContinuousStreamingSession implements StreamingSession {
   Future<void> _runLoop() async {
     try {
       _onBusyChanged(true);
+      _onPhaseChanged('idle');
+      _onStatusChanged('Listening for speech...');
 
       final micStream = _audioInputService.openMicrophoneStream();
       final iterator = StreamIterator<List<int>>(micStream);
@@ -127,65 +133,20 @@ class ContinuousStreamingSession implements StreamingSession {
           if (!_isActive) break;
           if (buffer.isEmpty) continue;
 
-          final transcript = (await _runStep(
-            'transcribing',
-            'Transcribing...',
-            () => _speechRecognizer.transcribe(
-              audioData: buffer.toList(),
-              language: _settings.sourceLanguage,
-              model: _settings.speechModel,
-            ),
-          ))?.trim();
+          final audio = buffer.toList();
           buffer.clear();
+          final spoke = await _processUtterance(audio);
           if (!_isActive) break;
 
-          if (transcript == null || transcript.isEmpty) {
-            continue;
+          // Only flush after TTS. Flushing after every utterance ate the next
+          // speech window in subtitle/hands-free mode.
+          if (spoke) {
+            await _flushBufferedAudio(iterator);
+            if (!_isActive) break;
           }
 
-          final translation = (await _runStep(
-            'translating',
-            'Translating...',
-            () => _translationEngine.translate(
-              transcript,
-              from: _settings.sourceLanguage,
-              to: _settings.targetLanguage,
-            ),
-          ))?.trim();
-          if (!_isActive) break;
-
-          if (translation == null || translation.isEmpty) {
-            continue;
-          }
-
-          final shouldSpeak =
-              _settings.mode == InterpreterMode.conversation &&
-              _settings.voicePlaybackEnabled;
-
-          if (!_messageController.isClosed) {
-            _messageController.add(
-              ConversationMessage(
-                sourceLanguage: _settings.sourceLanguage,
-                targetLanguage: _settings.targetLanguage,
-                transcript: transcript,
-                translation: translation,
-                createdAt: DateTime.now(),
-                latency: const Duration(milliseconds: 800),
-                spoken: shouldSpeak,
-              ),
-            );
-          }
-
-          if (shouldSpeak) {
-            _onPhaseChanged('speaking');
-            _onStatusChanged('Speaking translation...');
-            try {
-              await _ttsService.speak(
-                translation,
-                language: _settings.targetLanguage,
-              );
-            } catch (_) {}
-          }
+          _onPhaseChanged('idle');
+          _onStatusChanged('Listening for speech...');
         }
       } finally {
         await iterator.cancel();
@@ -194,6 +155,94 @@ class ContinuousStreamingSession implements StreamingSession {
       _onStatusChanged('Session error: $error');
     } finally {
       await stop();
+    }
+  }
+
+  /// Returns true when translated audio was spoken (mic may contain echo).
+  Future<bool> _processUtterance(List<int> audio) async {
+    final transcript = (await _runStep(
+      'transcribing',
+      'Transcribing...',
+      () => _speechRecognizer.transcribe(
+        audioData: audio,
+        language: _settings.sourceLanguage,
+        model: _settings.speechModel,
+      ),
+    ))?.trim();
+    if (!_isActive) {
+      return false;
+    }
+
+    if (transcript == null || transcript.isEmpty) {
+      return false;
+    }
+
+    final translation = (await _runStep(
+      'translating',
+      'Translating...',
+      () => _translationEngine.translate(
+        transcript,
+        from: _settings.sourceLanguage,
+        to: _settings.targetLanguage,
+      ),
+    ))?.trim();
+    if (!_isActive) {
+      return false;
+    }
+
+    if (translation == null || translation.isEmpty) {
+      return false;
+    }
+
+    final shouldSpeak =
+        _settings.mode == InterpreterMode.conversation &&
+        _settings.voicePlaybackEnabled;
+
+    if (!_messageController.isClosed) {
+      _messageController.add(
+        ConversationMessage(
+          sourceLanguage: _settings.sourceLanguage,
+          targetLanguage: _settings.targetLanguage,
+          transcript: transcript,
+          translation: translation,
+          createdAt: DateTime.now(),
+          latency: const Duration(milliseconds: 800),
+          spoken: shouldSpeak,
+        ),
+      );
+    }
+
+    if (!shouldSpeak) {
+      return false;
+    }
+
+    _onPhaseChanged('speaking');
+    _onStatusChanged('Speaking translation...');
+    try {
+      await _ttsService.speak(
+        translation,
+        language: _settings.targetLanguage,
+      );
+    } catch (_) {}
+    return true;
+  }
+
+  /// Drops mic chunks that arrived while we were busy (and a short tail after)
+  /// so speaker playback is not immediately re-transcribed.
+  Future<void> _flushBufferedAudio(StreamIterator<List<int>> iterator) async {
+    final deadline = DateTime.now().add(postUtteranceFlush);
+    while (_isActive && DateTime.now().isBefore(deadline)) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining.isNegative) {
+        break;
+      }
+      final hasNext = await iterator.moveNext().timeout(
+        remaining,
+        onTimeout: () => false,
+      );
+      if (!hasNext) {
+        break;
+      }
     }
   }
 

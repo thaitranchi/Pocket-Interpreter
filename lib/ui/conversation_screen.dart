@@ -202,10 +202,13 @@ class _ConversationScreenState extends State<ConversationScreen> {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           child: controller.isStreamingMode
               ? FilledButton.icon(
-                  onPressed: controller.isBusy
-                      ? null
-                      : (controller.isStreaming
-                            ? controller.stopStreaming
+                  // Stop must stay enabled while an utterance is processing;
+                  // isBusy alone used to disable the button permanently after
+                  // the first speech chunk in continuous mode.
+                  onPressed: controller.isStreaming
+                      ? controller.stopStreaming
+                      : (controller.isBusy
+                            ? null
                             : controller.startStreaming),
                   style: FilledButton.styleFrom(
                     backgroundColor: controller.isStreaming
@@ -222,10 +225,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
                         : 'Start continuous interpreting',
                   ),
                 )
-              : _PushToTalkButton(
-                  controller: controller,
-                  isPreparingModels: _isPreparingModels,
-                ),
+              : _PushToTalkButton(controller: controller),
         ),
       ),
     );
@@ -253,13 +253,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
 /// True press-and-hold capture: the recording length matches how long the user
 /// actually holds the button, instead of a fixed 500 ms window.
 class _PushToTalkButton extends StatefulWidget {
-  const _PushToTalkButton({
-    required this.controller,
-    required this.isPreparingModels,
-  });
+  const _PushToTalkButton({required this.controller});
 
   final ConversationController controller;
-  final bool isPreparingModels;
 
   @override
   State<_PushToTalkButton> createState() => _PushToTalkButtonState();
@@ -294,6 +290,9 @@ class _PushToTalkButtonState extends State<_PushToTalkButton> {
       label = 'Hold to interpret';
     }
 
+    // Capture is driven only by [Listener] pointer events. [FilledButton.onPressed]
+    // must not also call [startPushToTalk] — that fired a second capture on
+    // every release after the hold gesture ended.
     return Listener(
       onPointerDown: canInterpret && !isBusy
           ? (event) {
@@ -306,9 +305,7 @@ class _PushToTalkButtonState extends State<_PushToTalkButton> {
       onPointerUp: (event) => _release(event.pointer),
       onPointerCancel: (event) => _release(event.pointer),
       child: FilledButton.icon(
-        onPressed: canInterpret && !isBusy
-            ? () => controller.startPushToTalk()
-            : null,
+        onPressed: canInterpret && !isBusy ? () {} : null,
         icon: Icon(isBusy ? Icons.hearing : Icons.mic),
         label: Text(label),
         style: FilledButton.styleFrom(

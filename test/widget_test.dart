@@ -131,6 +131,59 @@ void main() {
 
     expect(calls, 2);
   });
+
+  // Regression: after the first speech chunk, phase stayed non-idle and the
+  // Stop button was disabled forever because onPressed keyed only on isBusy.
+  testWidgets('continuous Stop stays enabled while an utterance is processing', (
+    tester,
+  ) async {
+    final gate = Completer<void>();
+    final controller = ConversationController(
+      audioInputService: _SpeechThenSilenceAudioInputService(),
+      speechRecognizer: _GatedSpeechRecognizer(gate),
+      translationEngine: const _FakeTranslationEngine(),
+      ttsService: const _FakeTtsService(),
+      vadService: const _ContentVadService(),
+      modelInventory: ModelInventory.mvpDefaults(),
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ConversationScreen(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(InterpreterMode.subtitles.label));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Start continuous interpreting'));
+    // Advance the fake clock until speech is detected. The session stays in a
+    // non-idle phase (listening/transcribing) while the hold-to-stop bug would
+    // have disabled the button.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+
+    expect(controller.isStreaming, isTrue);
+    expect(controller.isBusy, isTrue);
+    expect(controller.phase, isNot(InterpreterPhase.idle));
+
+    final stopFinder = find.text('Stop continuous interpreting');
+    expect(stopFinder, findsOneWidget);
+
+    final stopButton = tester.widget<FilledButton>(
+      find.ancestor(of: stopFinder, matching: find.byType(FilledButton)),
+    );
+    expect(stopButton.onPressed, isNotNull);
+
+    await tester.tap(stopFinder);
+    await tester.pump();
+    gate.complete();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump();
+
+    expect(controller.isStreaming, isFalse);
+  });
 }
 
 ConversationController _controller() {
@@ -205,4 +258,49 @@ class _FakeVadService implements VadService {
 
   @override
   Future<bool> detectSpeech(List<int> audioChunk) async => true;
+}
+
+/// One speech burst, then silence. Keeps the stream open so the session stays
+/// alive while transcription is gated.
+class _SpeechThenSilenceAudioInputService implements AudioInputService {
+  @override
+  Stream<List<int>> openMicrophoneStream() async* {
+    yield List.filled(3200, 64);
+    for (var i = 0; i < 80; i++) {
+      yield List.filled(3200, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    while (true) {
+      yield List.filled(3200, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
+class _ContentVadService implements VadService {
+  const _ContentVadService();
+
+  @override
+  Future<bool> detectSpeech(List<int> audioChunk) async {
+    return audioChunk.any((byte) => byte != 0);
+  }
+}
+
+class _GatedSpeechRecognizer implements SpeechRecognizer {
+  _GatedSpeechRecognizer(this._gate);
+
+  final Completer<void> _gate;
+
+  @override
+  Future<String> transcribe({
+    required List<int> audioData,
+    required SupportedLanguage language,
+    required SpeechModelProfile model,
+  }) async {
+    await _gate.future;
+    return 'source text';
+  }
 }
